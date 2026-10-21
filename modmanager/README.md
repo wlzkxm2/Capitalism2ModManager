@@ -5,8 +5,10 @@ Python 3.8 이상 표준 라이브러리만 사용하며 Windows와 Linux(SteamO
 
 ```
 modmanager/
+├─ Cap2ModManager.exe  Windows 화면 (권장, 작업은 cap2mod.py에 맡김)
 ├─ cap2mod.py        매니저 본체 (CLI + tkinter GUI)
-├─ cap2mod.bat       Windows 런처 (더블클릭 → GUI)
+├─ cap2mod.bat       Windows 런처 (더블클릭 → tkinter GUI)
+├─ win/              Cap2ModManager.exe 소스 (C# WinForms, .NET Framework 4.8)
 ├─ cap2mod.sh        Linux 런처
 ├─ config.json       마지막으로 인식한 게임 경로(자동 생성)
 └─ mods/
@@ -18,9 +20,14 @@ modmanager/
 ## 1. 사용법
 
 ### Windows
-1. `cap2mod.bat` 더블클릭 → GUI가 열리고 Steam 라이브러리에서 게임을 자동 탐지합니다. 못 찾으면 **찾기…**로 `Cap2.exe`가 있는 폴더를 지정합니다.
-2. 모드 목록에서 더블클릭(또는 **활성/비활성 전환**)으로 켜고 끈 뒤 **적용**을 누릅니다.
-3. **원본 복원**은 적용 전 상태로 되돌립니다. **상태/검증**은 Steam 무결성 검사 등으로 파일이 바뀌었는지 확인합니다.
+1. `Cap2ModManager.exe` 더블클릭 → Steam 라이브러리에서 게임을 자동 탐지합니다. 못 찾으면 **찾기…**로 `Cap2.exe`를 지정합니다.
+   - Windows 10/11에 기본으로 들어 있는 .NET Framework 4.8로 동작하며, Python 3.8 이상이 설치돼 있어야 합니다(설치본을 자동으로 찾음).
+   - exe는 `cap2mod.py`와 같은 폴더에 두세요.
+2. **모드** 탭에서 체크박스로 켜고 끈 뒤 **적용**을 누릅니다.
+3. **원본 복원**은 적용 전 상태로 되돌립니다. **적용 상태 검증**은 Steam 무결성 검사 등으로 파일이 바뀌었는지 확인합니다.
+4. **세이브 동기화** 탭에서 동기화 폴더 설정, 지금 동기화, Steam 실행 옵션 복사를 할 수 있습니다.
+
+`cap2mod.bat`(tkinter 화면)도 그대로 쓸 수 있습니다. exe 빌드: `dotnet build modmanager/win -c Release` → `modmanager/win/bin/Release/Cap2ModManager.exe`.
 
 명령줄:
 ```bat

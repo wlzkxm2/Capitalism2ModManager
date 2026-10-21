@@ -1087,6 +1087,34 @@ def do_status(game, mods, enabled):
     log("모드 폴더 : %s (%d개, 활성 %d개)" % (MODS_DIR, len(mods), sum(1 for v in enabled.values() if v)))
 
 
+def info_json(game_arg, mods, enabled):
+    """GUI(외부 프로그램)용 상태 정보. 표준 출력에 JSON 한 덩어리."""
+    out = {"version": VERSION, "mods_dir": MODS_DIR, "config": load_config(), "game": None, "game_error": None,
+           "candidates": detect_game_dirs(),
+           "mods": [{"id": m.id, "name": m.name, "version": m.version, "priority": m.priority, "author": m.author,
+                     "description": m.description, "kinds": m.summary(), "enabled": bool(enabled.get(m.id))}
+                    for m in sorted(mods.values(), key=lambda m: (m.priority, m.id))]}
+    try:
+        cfg = load_config()
+        cand = game_arg or cfg.get("game_dir") or (out["candidates"][0] if out["candidates"] else None)
+        if cand:
+            g = Game(cand)
+            man = g.load_manifest()
+            out["game"] = {"dir": g.dir, "exe_sha256": g.exe_sha, "build": g.build_name,
+                           "save_dir": _local_save_root(g),
+                           "applied": ({"at": man["applied_at"], "mods": man["mods"], "files": len(man["files"])} if man else None)}
+    except ModError as e:
+        out["game_error"] = str(e)
+    py = sys.executable
+    if IS_WIN and py.lower().endswith("python.exe") and os.path.isfile(py[:-10] + "pythonw.exe"):
+        py = py[:-10] + "pythonw.exe"
+    if IS_WIN:
+        out["launch_option"] = '"%s" "%s" run -- %%command%%' % (py, os.path.abspath(__file__))
+    else:
+        out["launch_option"] = "python3 %s run -- %%command%%" % os.path.abspath(__file__)
+    print(json.dumps(out, ensure_ascii=False))
+
+
 def do_list(mods, enabled):
     if not mods:
         log("mods/ 에 모드가 없습니다: %s" % MODS_DIR)
@@ -1637,6 +1665,7 @@ def main(argv=None):
     p.add_argument("action", choices=["ls", "extract"]); p.add_argument("rel")
     p.add_argument("--record"); p.add_argument("--out", default="res_out")
     sub.add_parser("gui", help="GUI 실행(tkinter)")
+    sub.add_parser("info", help="상태 정보를 JSON으로 출력(외부 GUI용)")
     p = sub.add_parser("sync-setup", help="세이브 동기화 폴더 지정(폴더 경로 또는 smb://호스트/공유/경로)"); p.add_argument("dir")
     p.add_argument("--auth", help="smb:// 일 때 smbclient 인증 파일(username=/password=). 기본 ~/.cap2sync_smb")
     p = sub.add_parser("sync", help="세이브 동기화 한 번 실행"); p.add_argument("--dir")
@@ -1670,6 +1699,9 @@ def main(argv=None):
         enabled = load_enabled(mods)
         if args.cmd == "list":
             do_list(mods, enabled)
+            return 0
+        if args.cmd == "info":
+            info_json(args.game, mods, enabled)
             return 0
         if args.cmd in ("enable", "disable"):
             for i in args.ids:

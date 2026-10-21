@@ -17,6 +17,10 @@
 /modmanager/sync.log
 /modmanager/sync_cache/
 
+# C# 빌드 산출물
+/modmanager/win/bin/
+/modmanager/win/obj/
+
 # Python
 __pycache__/
 *.py[cod]
