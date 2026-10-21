@@ -4,8 +4,11 @@
 /patch/
 # REA 분석 보고서
 /analysis/
+# 한글 UI 이미지 생성 작업 공간(원본 게임 이미지 포함)
+/art/
 # 한글 패치 모드 본체(릴리스 자산으로 배포)
 /modmanager/mods/korean_patch/
+/modmanager/mods/supply_hint/
 
 # 실행 시 생성되는 사용자별 상태
 /modmanager/config.json

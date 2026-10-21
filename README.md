@@ -12,8 +12,9 @@ Steam판 **Capitalism 2**(Cap2.exe, SDL2 빌드)용 모드 매니저입니다. W
 
 | 파일 | 내용 |
 |---|---|
-| `Capitalism2ModManager-<버전>.zip` | 모드 매니저 + 한글 패치 모드(`mods/korean_patch`) 포함 |
+| `Capitalism2ModManager-<버전>.zip` | 모드 매니저 + 한글 패치(`mods/korean_patch`) + 공급처 표시(`mods/supply_hint`) 모드 포함 |
 | `korean_patch-<버전>.zip` | 한글 패치 모드만. 매니저의 `mods/` 폴더에 풀어 넣으면 됩니다 |
+| `supply_hint-<버전>.zip` | 공급처 없는 구매 칸 표시 모드만. 매니저의 `mods/` 폴더에 풀어 넣으면 됩니다 |
 
 ## 빠른 사용법
 
@@ -25,5 +26,9 @@ Steam판 **Capitalism 2**(Cap2.exe, SDL2 빌드)용 모드 매니저입니다. W
 ## 한글 패치
 
 - 게임 실행 파일(Cap2.exe)은 수정하지 않습니다. 프록시 `SDL2.dll`로 글자 출력 함수를 교체하고 메뉴·도움말·튜토리얼·시나리오 설명·건물/제품명을 번역합니다.
-- 글꼴은 **Noto Sans KR**(SIL Open Font License 1.1)을 동봉하며 시스템에 설치하지 않고 게임 프로세스 안에서만 등록합니다.
+- 글꼴은 **나눔스퀘어라운드**(SIL Open Font License 1.1)를 동봉하며 시스템에 설치하지 않고 게임 프로세스 안에서만 등록합니다.
 - Steam에서 "게임 파일 무결성 검사"를 하면 원본으로 돌아가므로 매니저에서 다시 **적용**하면 됩니다.
+
+## 공급처 없는 구매 칸 표시 (supply_hint)
+
+공장에 배치 계획을 적용했는데 공급처를 못 찾은 구매 칸에 사야 할 상품 이름과 "공급처 없음"을 표시합니다. 한글 패치와 함께 쓰면 모드 매니저가 두 프록시 DLL을 사슬로 연결합니다.

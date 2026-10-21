@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 APP_ID = "638200"                       # Steam appmanifest_638200.acf ("Capitalism 2")
 GAME_EXE = "Cap2.exe"
 KNOWN_EXE_SHA256 = {
@@ -457,10 +457,11 @@ class ResIdx:
 _LINE_RE = re.compile(r"^(\[[^\]]*\])?(.*?)(\|?)(\x1a?)(\r?\n?)$", re.S)
 
 
-def patch_text_res(orig, rel, line_map, enc, strict_ksx):
+def patch_text_res(orig, rel, line_map, enc, strict_ksx, pairs=None):
     """
     orig: 원본 바이트. line_map: {줄번호(1-base): 한국어}. .des 는 {1: 전체 본문}.
     Txtres 로더는 줄 번호 인덱스이므로 줄 수/[TAG]/끝 '|'/0x1A/개행을 그대로 유지한다.
+    pairs 가 리스트면 바꾼 줄의 (번역 바이트, 원문 바이트)를 덧붙인다(.res 만).
     """
     errors = []
     if rel.lower().endswith(".des"):
@@ -493,6 +494,8 @@ def patch_text_res(orig, rel, line_map, enc, strict_ksx):
             kb = body.encode("latin-1")
         out.write(tag.encode("latin-1") if tag else b"")
         out.write(kb)
+        if pairs is not None and body and kb != body.encode("latin-1"):
+            pairs.append(((tag or "").encode("latin-1"), kb, body.encode("latin-1")))
         out.write((pipe + eof + nl).encode("latin-1"))
     res = out.getvalue()
     if orig.count(b"\n") != res.count(b"\n"):
@@ -752,6 +755,42 @@ def get_game(args_game=None, interactive=False):
 # ----------------------------------------------------------------------------
 # 적용 / 복원 / 검증
 # ----------------------------------------------------------------------------
+def build_proxy_chain(rel, ms):
+    """
+    같은 DLL(rel, 예: SDL2.dll)을 프록시하는 모드 ms(낮은 우선순위부터)를 사슬로 잇는다.
+      rel(가장 높은 우선순위 모드) → X_c01 → … → X_org(원본)
+    각 프록시 DLL은 내보내기를 "X_org.함수" 로 포워딩하므로, 포워더 문자열의 모듈 이름을
+    같은 길이의 다음 고리 이름(X_cNN)으로 바꿔 쓴다. → [(상대경로, 바이트, 모드 id)]
+    """
+    org_rel = norm_rel(ms[0].proxy_dll["original_as"])
+    org_stem = os.path.splitext(os.path.basename(org_rel))[0]
+    stem, ext = os.path.splitext(rel)
+    if not org_stem.lower().startswith(os.path.basename(stem).lower() + "_") or len(org_stem) != len(os.path.basename(stem)) + 4:
+        raise ModError("프록시 사슬은 원본 이름이 '<이름>_org' 형식일 때만 지원합니다: %s" % org_rel)
+    for m in ms:
+        if norm_rel(m.proxy_dll["original_as"]) != org_rel:
+            raise ModError("[%s] proxy_dll original_as 가 다른 모드와 다릅니다: %s" % (m.id, m.proxy_dll["original_as"]))
+    n = len(ms)
+    if n > 99:
+        raise ModError("프록시 사슬이 너무 깁니다: %s" % rel)
+    links = ["%s_c%02d" % (os.path.basename(stem), i + 1) for i in range(n - 1)]   # 사슬 중간 이름
+    out = []
+    for i, m in enumerate(ms):
+        src = os.path.join(m.dir, m.files_dir, m.proxy_dll["file"])
+        with open(src, "rb") as f:
+            data = f.read()
+        target = org_stem if i == 0 else links[i - 1]
+        old = org_stem.encode("ascii") + b"."
+        cnt = data.count(old)
+        if cnt == 0:
+            raise ModError("[%s] %s 에서 포워딩 대상 '%s' 를 찾지 못했습니다." % (m.id, m.proxy_dll["file"], old.decode()))
+        data = data.replace(old, target.encode("ascii") + b".")
+        name = rel if i == n - 1 else norm_rel(os.path.join(os.path.dirname(rel), links[i] + ext))
+        log("  프록시 사슬: %-14s %s → %s (%d개 포워딩)" % (m.id, name, target, cnt))
+        out.append((name, data, m.id))
+    return out
+
+
 def plan_apply(game, active):
     """
     활성 모드 → {상대경로: {"data": bytes, "mods": [id...]}} 계획.
@@ -770,13 +809,25 @@ def plan_apply(game, active):
         e["mods"].append(mod_id)
         e["kinds"].append(kind)
 
+    # 0) 같은 DLL을 프록시하는 모드가 여럿이면 사슬로 연결한다(오버레이에서 제외하고 아래에서 따로 배치)
+    by_file = {}
+    for m in active:
+        if m.proxy_dll:
+            by_file.setdefault(norm_rel(m.proxy_dll["file"]), []).append(m)
+    chained = {rel for rel, ms in by_file.items() if len(ms) > 1}
+
     # 1) 오버레이
     for m in active:
         for rel, ap in m.overlay_files():
+            if rel in chained and m in by_file[rel]:
+                continue
             with open(ap, "rb") as f:
                 put(rel, f.read(), m.id, "file")
-        if m.proxy_dll:
-            proxies.append((m.id, m.proxy_dll))
+    for rel, ms in by_file.items():
+        proxies.append((ms[-1].id, ms[-1].proxy_dll))
+        if rel in chained:
+            for name, data, mid in build_proxy_chain(rel, ms):
+                put(name, data, mid, "proxy-chain")
 
     # 2) RES 레코드 교체
     for m in active:
@@ -806,16 +857,36 @@ def plan_apply(game, active):
         for rel, lm in m.text_patch_map().items():
             merged.setdefault(rel, {}).update(lm)
             meta[rel] = (m.encoding, m.ksx1001_only, m.id)
+    orig_pairs = []
     for rel, lm in sorted(merged.items()):
         base = plan[rel]["data"] if rel in plan else game.original_bytes(rel)
         if base is None:
             warn("텍스트 치환 대상 원본 없음: %s" % rel)
             continue
         enc, strict, mid = meta[rel]
-        data, errs = patch_text_res(base, rel, lm, enc, strict)
+        data, errs = patch_text_res(base, rel, lm, enc, strict, orig_pairs)
         for e in errs:
             warn(e)
         put(rel, data, mid, "text(%d줄)" % len(lm))
+    # 번역 → 원문 대응표: 영문 폭에 맞춘 배경 이미지 위에 칸을 놓는 화면에서 DLL이 원문 폭을 쓰도록
+    outs = [m for m in active if m.meta.get("orig_map_out")]
+    if outs and orig_pairs:
+        # 키: "[TAG]번역" (게임 메모리에서 문자열 바로 앞에 태그가 남아 있음). 태그 없는 키는
+        # 같은 번역이 서로 다른 원문에 쓰이지 않을 때만 넣는다.
+        plain = {}
+        for tag, kb, eb in orig_pairs:
+            plain.setdefault(kb, set()).add(eb)
+        seen, buf = set(), io.BytesIO()
+        for tag, kb, eb in orig_pairs:
+            keys = [tag + kb] if tag else []
+            if len(plain[kb]) == 1:
+                keys.append(kb)
+            for key in keys:
+                if b"|" in key or b"|" in eb or b"\n" in key or key in seen:
+                    continue
+                seen.add(key)
+                buf.write(key + b"|" + eb + b"\r\n")
+        put(outs[-1].meta["orig_map_out"], buf.getvalue(), outs[-1].id, "orig-map(%d항목)" % len(seen))
 
     # 4) TRANSLAT.RES
     pairs, seen = [], {}
