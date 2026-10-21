@@ -1,0 +1,27 @@
+# 저장소에는 모드 매니저 코드만 올린다. 한글 패치와 분석 자료는 릴리스 zip으로만 배포.
+
+# 한글 패치 작업 공간(DLL 소스·빌드·원본 백업·번역 원본)
+/patch/
+# REA 분석 보고서
+/analysis/
+# 한글 패치 모드 본체(릴리스 자산으로 배포)
+/modmanager/mods/korean_patch/
+
+# 실행 시 생성되는 사용자별 상태
+/modmanager/config.json
+/modmanager/mods/enabled.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 릴리스 빌드 산출물
+/dist/
+
+# OS/편집기
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+.vscode/
+.idea/

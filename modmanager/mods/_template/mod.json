@@ -1,0 +1,19 @@
+{
+  "id": "_template",
+  "name": "새 모드 템플릿 (복사해서 사용)",
+  "version": "0.1.0",
+  "author": "",
+  "description": "이 폴더를 복사해 id/폴더명을 바꾸고 files/, text/, translat/ 중 필요한 것만 채우세요. 비어 있는 항목은 무시됩니다.",
+  "priority": 200,
+  "default_enabled": false,
+  "requires": [],
+  "conflicts": [],
+  "requires_exe_sha256": [],
+  "encoding": "cp949",
+  "ksx1001_only": true,
+  "files": "files",
+  "res_records": [],
+  "text_patches": [],
+  "translat": [],
+  "exe_strings": []
+}

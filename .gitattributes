@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+# 런처 줄바꿈 고정: Linux 셸 스크립트는 LF, Windows 배치는 CRLF
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.py  text eol=lf
