@@ -1161,6 +1161,7 @@ def run_gui(args):
     root = tk.Tk()
     root.title("Capitalism 2 모드 매니저 (cap2mod %s)" % VERSION)
     root.geometry("860x600")
+    root.minsize(620, 360)
 
     state = {"game": None, "mods": {}, "enabled": {}}
 
@@ -1276,7 +1277,8 @@ def run_gui(args):
         do_verify(state["game"])
 
     btns = ttk.Frame(root, padding=8)
-    btns.pack(fill="x")
+    # 버튼 줄을 목록·로그보다 먼저 아래쪽에 배치해 창을 줄여도 항상 보이게 함
+    btns.pack(side="bottom", fill="x", before=mid)
     ttk.Button(top, text="자동 탐지", command=guarded(on_detect)).pack(side="left", padx=2)
     ttk.Button(top, text="찾기…", command=guarded(on_browse)).pack(side="left", padx=2)
     ttk.Button(btns, text="활성/비활성 전환", command=guarded(toggle)).pack(side="left", padx=2)
