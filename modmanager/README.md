@@ -96,3 +96,36 @@ Steam에서 "게임 파일 무결성 검사"를 하면 Steam이 원본을 다시
 - `Cap2.exe` 자체는 수정하지 않습니다. 코드 변경은 프록시 DLL(예: 한글 패치의 `SDL2.dll`) 방식으로만 가능합니다. 같은 DLL의 프록시는 사슬로 연결되므로 여러 모드가 각자 훅을 걸 수 있지만, 같은 코드 위치에 훅을 거는 모드끼리는 충돌할 수 있습니다.
 - `exe_strings`는 Cap2.exe 빌드(해시)에 묶입니다.
 - 매니저 상태는 게임 폴더의 `cap2mod/`에 있으므로 게임을 지우면 백업도 사라집니다(Steam이 원본을 다시 내려받으므로 복구는 가능).
+
+## 세이브 자동 동기화 (Steam 클라우드 대체)
+
+Capitalism 2는 Steam 클라우드를 지원하지 않습니다. 대신 Steam 실행 옵션으로 매니저를 거쳐 게임을 켜면, 게임 시작 직전에 최신 세이브를 받고 게임 종료 직후 바뀐 세이브를 올립니다. 동기화 대상은 세이브 폴더(`Documents/My Games/Capitalism 2/SAVE`, Proton은 `compatdata/638200/pfx/.../SAVE`)이고 기기별 설정(`CONFIG.DAT`)은 건드리지 않습니다.
+
+1. 기기마다 한 번: `cap2mod sync-setup <공유 폴더>` — 폴더를 기억하고 첫 동기화를 한 뒤 실행 옵션 줄을 출력합니다.
+2. Steam → 라이브러리 → Capitalism 2 → 속성 → 일반 → 실행 옵션에 출력된 줄을 넣습니다.
+   - Windows 예: `"C:\...\pythonw.exe" "C:\...\cap2mod.py" run -- %command%`
+   - Steam Deck 예: `python3 /home/deck/Capitalism2ModManager/cap2mod.py run -- %command%`
+3. 수동 실행: `cap2mod sync` (양방향), `cap2mod sync --direction pull|push`
+
+- 비교 방식: 기기마다 마지막 동기화 상태를 `sync_base.json`에 남겨 3-방향으로 비교합니다. 한쪽만 바뀐 파일은 그쪽으로 맞추고, 지운 파일은 지운 채로 맞춥니다.
+- 두 기기에서 같은 세이브를 따로 바꾸면 수정 시각이 늦은 쪽을 남기고, 다른 쪽은 공유 폴더 `backup/<시각>_<기기>_.../`에 보관합니다. 지워진 파일도 같은 곳에 보관합니다.
+- 게임 실행 중에는 공유 폴더에 `lock.json`을 남겨, 다른 기기에서 동시에 실행하면 `sync.log`에 경고를 남깁니다.
+- 공유 폴더에 접근할 수 없으면 동기화를 건너뛰고 게임은 그대로 실행됩니다. 다음 실행 때 다시 맞춥니다.
+- 기록: 매니저 폴더의 `sync.log`
+
+### 마운트할 수 없는 기기(Android 위 리눅스 등): `smb://`
+
+공유 폴더를 마운트할 수 없으면 `smbclient`로 직접 주고받습니다.
+
+1. Windows PC(관리자 PowerShell): `tools/setup_cap2sync_share.ps1` — 전용 로컬 계정 `cap2sync`와 공유 `cap2saves`(세이브 폴더만)를 만듭니다.
+2. 기기에서 인증 파일(권한 600):
+   ```
+   printf 'username=cap2sync
+password=%s
+domain=<PC 이름>
+' '<암호>' > ~/.cap2sync_smb && chmod 600 ~/.cap2sync_smb
+   ```
+3. `python3 cap2mod.py sync-setup smb://<PC 주소>/cap2saves` (다른 인증 파일은 `--auth`)
+
+원격 세이브를 `sync_cache/`로 받아 같은 방식으로 비교한 뒤 바뀐 파일만 다시 올립니다.
+

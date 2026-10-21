@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 APP_ID = "638200"                       # Steam appmanifest_638200.acf ("Capitalism 2")
 GAME_EXE = "Cap2.exe"
 KNOWN_EXE_SHA256 = {
@@ -74,7 +74,7 @@ _LOG_SINK = [None]   # GUI가 가로채기 위한 훅
 def log(msg=""):
     if _LOG_SINK[0]:
         _LOG_SINK[0](str(msg))
-    else:
+    elif sys.stdout:          # pythonw(콘솔 없음)로 실행되면 None
         print(msg)
 
 
@@ -261,9 +261,10 @@ def detect_game_dirs():
             found.append(cand)
     out, seen = [], set()
     for f in found:
-        if f.lower() not in seen:
-            seen.add(f.lower())
-            out.append(f)
+        k = os.path.normcase(os.path.realpath(f))      # ~/.steam/steam 같은 심볼릭 링크 중복 제거
+        if k not in seen:
+            seen.add(k)
+            out.append(os.path.realpath(f))
     return out
 
 
@@ -284,7 +285,13 @@ def user_data_dirs(game_dir):
             pfx = os.path.join(lib, "steamapps", "compatdata", APP_ID, "pfx", "drive_c", "users", "steamuser")
             for docs in ("Documents", "My Documents"):
                 cands.append(os.path.join(pfx, docs, "My Games", "Capitalism 2"))
-    return [c for c in cands if os.path.isdir(c)]
+    out, seen = [], set()
+    for c in cands:
+        k = os.path.normcase(os.path.realpath(c))
+        if os.path.isdir(c) and k not in seen:
+            seen.add(k)
+            out.append(os.path.realpath(c))
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -1304,6 +1311,308 @@ def _open_folder(path):
 
 
 # ----------------------------------------------------------------------------
+# 세이브 동기화 (Steam 클라우드 미지원 대체)
+#   원격 폴더(네트워크 폴더 등) 구조:
+#     <remote>/SAVE/...            세이브 파일(게임의 SAVE 폴더와 같은 구조)
+#     <remote>/sync_state.json     파일별 sha256·수정 시각·마지막으로 올린 기기
+#     <remote>/lock.json           게임 실행 중인 기기(다른 기기에서 동시에 실행하면 경고)
+#     <remote>/backup/<시각>_<기기>/  충돌·삭제로 밀려난 파일
+#   기기별 마지막 동기화 상태: 매니저 폴더의 sync_base.json (3-방향 비교의 기준)
+# ----------------------------------------------------------------------------
+SYNC_BASE_PATH = os.path.join(HERE, "sync_base.json")
+SYNC_LOG_PATH = os.path.join(HERE, "sync.log")
+SYNC_SUBDIR = "SAVE"
+LOCK_STALE_SEC = 12 * 3600
+
+
+def _sync_log(msg):
+    try:
+        with open(SYNC_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except OSError:
+        pass
+    if sys.stdout:
+        log(msg)
+
+
+def _device():
+    return platform.node() or "unknown"
+
+
+def _local_save_root(game):
+    """세이브 루트(…/My Games/Capitalism 2). 없으면 기본 위치를 돌려줌(Windows) 또는 None(Proton 프리픽스 미생성)."""
+    found = user_data_dirs(game.dir)
+    if found:
+        return found[0]
+    if IS_WIN:
+        return os.path.join(os.path.expanduser("~"), "Documents", "My Games", "Capitalism 2")
+    return None
+
+
+def _scan(root):
+    """{상대경로: (sha256, mtime)} — root/SAVE 아래 모든 파일"""
+    out = {}
+    base = os.path.join(root, SYNC_SUBDIR) if root else None
+    if not base or not os.path.isdir(base):
+        return out
+    for r, _, files in os.walk(base):
+        for fn in files:
+            p = os.path.join(r, fn)
+            rel = os.path.relpath(p, base).replace(os.sep, "/")
+            out[rel] = (sha256_file(p), os.path.getmtime(p))
+    return out
+
+
+def _copy(src_root, dst_root, rel):
+    s = os.path.join(src_root, SYNC_SUBDIR, rel.replace("/", os.sep))
+    d = os.path.join(dst_root, SYNC_SUBDIR, rel.replace("/", os.sep))
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    tmp = d + ".cap2sync_tmp"
+    shutil.copy2(s, tmp)
+    os.replace(tmp, d)
+
+
+def _backup(remote, root, rel, tag):
+    s = os.path.join(root, SYNC_SUBDIR, rel.replace("/", os.sep))
+    if not os.path.isfile(s):
+        return
+    d = os.path.join(remote, "backup", "%s_%s_%s" % (time.strftime("%Y%m%d-%H%M%S"), _device(), tag), rel.replace("/", os.sep))
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    shutil.copy2(s, d)
+
+
+def _load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def _save_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def do_sync(game, remote, direction):
+    """direction: pull(게임 시작 전) / push(게임 종료 후) / both.
+    3-방향 비교(이 기기의 마지막 동기화 기준 B, 로컬 L, 원격 R):
+      L==R → 그대로 / L==B → 원격 변경을 받음 / R==B → 로컬 변경을 올림 /
+      둘 다 바뀜 → 수정 시각이 늦은 쪽을 채택하고 다른 쪽은 원격 backup/ 에 보관"""
+    if not os.path.isdir(remote):
+        _sync_log("동기화 건너뜀: 원격 폴더에 접근할 수 없습니다 (%s). 다음 실행 때 다시 맞춥니다." % remote)
+        return False
+    local = _local_save_root(game)
+    if local is None:
+        _sync_log("동기화 건너뜀: 이 기기의 세이브 폴더가 아직 없습니다(게임을 한 번 실행하면 생깁니다).")
+        return False
+    os.makedirs(os.path.join(local, SYNC_SUBDIR), exist_ok=True)
+    os.makedirs(os.path.join(remote, SYNC_SUBDIR), exist_ok=True)
+    allbase = _load_json(SYNC_BASE_PATH, {})
+    key = os.path.normcase(os.path.abspath(remote))
+    base = allbase.get(key, {})
+    L, R = _scan(local), _scan(remote)
+    pulled = pushed = conflicts = deleted = 0
+    for rel in sorted(set(L) | set(R) | set(base)):
+        l, r, b = L.get(rel), R.get(rel), base.get(rel)
+        lh, rh = (l[0] if l else None), (r[0] if r else None)
+        if lh == rh:
+            continue
+        if lh == b and direction in ("pull", "both"):            # 원격만 바뀜(또는 원격에서 삭제)
+            if rh is None:
+                _backup(remote, local, rel, "deleted-remote"); os.remove(os.path.join(local, SYNC_SUBDIR, rel)); deleted += 1
+            else:
+                _copy(remote, local, rel); pulled += 1
+        elif rh == b and direction in ("push", "both"):          # 로컬만 바뀜(또는 로컬에서 삭제)
+            if lh is None:
+                _backup(remote, remote, rel, "deleted-local"); os.remove(os.path.join(remote, SYNC_SUBDIR, rel)); deleted += 1
+            else:
+                _copy(local, remote, rel); pushed += 1
+        elif lh != b and rh != b:                               # 양쪽 다 바뀜 → 충돌
+            conflicts += 1
+            if l and (not r or l[1] >= r[1]):
+                _backup(remote, remote, rel, "conflict-remote"); _copy(local, remote, rel); pushed += 1
+                _sync_log("  충돌 %s: 이 기기 쪽이 최신 → 원격 파일은 backup/ 에 보관" % rel)
+            elif r:
+                _backup(remote, local, rel, "conflict-local"); _copy(remote, local, rel); pulled += 1
+                _sync_log("  충돌 %s: 원격 쪽이 최신 → 이 기기 파일은 backup/ 에 보관" % rel)
+    # 새 기준 = 지금 양쪽이 같은 파일들
+    L, R = _scan(local), _scan(remote)
+    allbase[key] = {rel: L[rel][0] for rel in L if rel in R and L[rel][0] == R[rel][0]}
+    _save_json(SYNC_BASE_PATH, allbase)
+    state = {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "device": _device(),
+             "files": {rel: {"sha256": v[0], "mtime": v[1]} for rel, v in R.items()}}
+    _save_json(os.path.join(remote, "sync_state.json"), state)
+    _sync_log("동기화(%s) %s ↔ %s: 받음 %d, 올림 %d, 삭제 %d, 충돌 %d" % (direction, local, remote, pulled, pushed, deleted, conflicts))
+    return True
+
+
+def _lock(remote, take):
+    p = os.path.join(remote, "lock.json")
+    if not os.path.isdir(remote):
+        return
+    if take:
+        cur = _load_json(p, None)
+        if cur and cur.get("device") != _device() and time.time() - cur.get("time", 0) < LOCK_STALE_SEC:
+            _sync_log("경고: %s 기기에서 %s부터 게임이 실행 중입니다. 양쪽에서 저장하면 충돌로 처리됩니다." % (cur.get("device"), cur.get("since")))
+        _save_json(p, {"device": _device(), "time": time.time(), "since": time.strftime("%Y-%m-%d %H:%M:%S")})
+    else:
+        cur = _load_json(p, None)
+        if cur and cur.get("device") == _device():
+            os.remove(p)
+
+
+def sync_remote(arg):
+    cfg = load_config()
+    remote = arg or cfg.get("sync_dir")
+    if not remote:
+        raise ModError("동기화 폴더가 없습니다. cap2mod sync-setup <폴더 또는 smb://호스트/공유/경로> 로 지정하세요.")
+    if remote.startswith("smb://"):
+        return remote
+    return os.path.abspath(os.path.expanduser(remote))
+
+
+# ---- smb:// 원격: 마운트할 수 없는 환경(Android 위 리눅스 등)에서 smbclient로 주고받는다 ----
+#   원격을 로컬 캐시 폴더로 내려받아 기존 동기화를 그대로 돌린 뒤, 바뀐 파일만 다시 올린다.
+#   계정 정보: smbclient 인증 파일(username=, password=, domain=). 기본 ~/.cap2sync_smb (권한 600)
+SMB_CACHE_DIR = os.path.join(HERE, "sync_cache")
+SMB_AUTH_DEFAULT = os.path.join(os.path.expanduser("~"), ".cap2sync_smb")
+
+
+class SmbMirror:
+    def __init__(self, url, auth=None):
+        m = re.match(r"^smb://([^/]+)/([^/]+)(/.*)?$", url)
+        if not m:
+            raise ModError("smb 주소 형식: smb://호스트/공유이름[/하위경로]")
+        self.service = "//%s/%s" % (m.group(1), m.group(2))
+        self.sub = (m.group(3) or "").strip("/")
+        self.auth = auth or load_config().get("sync_smb_auth") or SMB_AUTH_DEFAULT
+        self.cache = SMB_CACHE_DIR
+        self.ok = False
+        self.before = {}
+
+    def _run(self, cmds, timeout=120):
+        exe = shutil.which("smbclient")
+        if not exe:
+            raise ModError("smbclient 가 없습니다(pacman -S smbclient / apt install smbclient).")
+        if not os.path.isfile(self.auth):
+            raise ModError("smb 인증 파일이 없습니다: %s (username=… / password=… 두 줄)" % self.auth)
+        r = subprocess.run([exe, self.service, "-A", self.auth, "-m", "SMB3", "-c", "; ".join(cmds)],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        out = (r.stdout or "") + (r.stderr or "")
+        # 없는 파일 받기(처음 동기화)·이미 있는 폴더 만들기는 정상
+        benign = ("NT_STATUS_NO_SUCH_FILE", "NT_STATUS_OBJECT_NAME_NOT_FOUND", "NT_STATUS_OBJECT_NAME_COLLISION",
+                  "NT_STATUS_OBJECT_PATH_NOT_FOUND")
+        bad = [s for s in re.findall(r"NT_STATUS_[A-Z_]+", out) if s not in benign]
+        if bad or (r.returncode and not re.findall(r"NT_STATUS_[A-Z_]+", out)):
+            raise ModError("smbclient 실패(%s): %s" % (",".join(sorted(set(bad))) or r.returncode, out.strip()[-400:]))
+        return out
+
+    @staticmethod
+    def _q(s):
+        return '"%s"' % s.replace('"', '')
+
+    def _rdir(self, rel_dir=""):
+        parts = [p for p in (self.sub + "/" + rel_dir).split("/") if p]
+        return "\\".join(parts)
+
+    def fetch(self):
+        """원격의 SAVE/, sync_state.json, lock.json 을 캐시로 받음. 접근 실패 시 False(동기화 건너뜀)"""
+        if os.path.isdir(self.cache):
+            shutil.rmtree(self.cache)
+        os.makedirs(os.path.join(self.cache, SYNC_SUBDIR))
+        cmds = []
+        if self.sub:
+            cmds.append("cd " + self._q(self._rdir()))
+        cmds += ["lcd " + self._q(self.cache), "prompt OFF", "recurse ON",
+                 "get sync_state.json", "get lock.json", "mget " + SYNC_SUBDIR]
+        try:
+            self._run(cmds)
+        except (ModError, subprocess.TimeoutExpired, OSError) as e:
+            _sync_log("원격(smb) 접근 실패: %s" % e)
+            return False
+        self.before = self._snapshot()
+        self.ok = True
+        return True
+
+    def _snapshot(self):
+        out = {}
+        for r, _, files in os.walk(self.cache):
+            for fn in files:
+                p = os.path.join(r, fn)
+                out[os.path.relpath(p, self.cache).replace(os.sep, "/")] = sha256_file(p)
+        return out
+
+    def commit(self):
+        """캐시에서 바뀐 파일을 올리고, 사라진 파일은 원격에서 지움"""
+        if not self.ok:
+            return
+        after = self._snapshot()
+        cmds = []
+        made = set()
+        for rel in sorted(after):
+            if self.before.get(rel) == after[rel]:
+                continue
+            d, fn = os.path.split(rel)
+            if d and d not in made:
+                acc = ""
+                for part in d.split("/"):
+                    acc = acc + "/" + part if acc else part
+                    if acc not in made:
+                        cmds.append("mkdir " + self._q(self._rdir(acc)))
+                        made.add(acc)
+            cmds += ["cd " + self._q("\\" + self._rdir(d) if self._rdir(d) else "\\"),
+                     "lcd " + self._q(os.path.join(self.cache, d.replace("/", os.sep))),
+                     "put " + self._q(fn)]
+        for rel in sorted(set(self.before) - set(after)):
+            d, fn = os.path.split(rel)
+            cmds += ["cd " + self._q("\\" + self._rdir(d) if self._rdir(d) else "\\"), "del " + self._q(fn)]
+        if cmds:
+            self._run(cmds, timeout=300)
+
+
+def _with_remote(remote, fn):
+    """remote 가 smb:// 면 캐시로 받아 fn(로컬경로) 실행 후 올림. 아니면 그대로."""
+    if not str(remote).startswith("smb://"):
+        return fn(remote)
+    mirror = SmbMirror(remote)
+    if not mirror.fetch():
+        _sync_log("동기화 건너뜀: smb 원격에 접근할 수 없습니다. 다음 실행 때 다시 맞춥니다.")
+        return False
+    r = fn(mirror.cache)
+    mirror.commit()
+    return r
+
+
+def do_run(game, remote, command):
+    """Steam 실행 옵션용: 세이브 받기 → 게임 실행(끝날 때까지 대기) → 세이브 올리기"""
+    if not command:
+        raise ModError("실행할 명령이 없습니다. 예: cap2mod run -- %command%")
+
+    def before(path):
+        do_sync(game, path, "pull"); _lock(path, True)
+
+    def after(path):
+        do_sync(game, path, "push"); _lock(path, False)
+
+    try:
+        _with_remote(remote, before)
+    except Exception as e:      # 동기화 문제로 게임 실행을 막지 않음
+        _sync_log("동기화(받기) 오류: %s" % e)
+    _sync_log("게임 실행: %s" % " ".join(command))
+    try:
+        rc = subprocess.call(command, cwd=game.dir if IS_WIN else None)
+    finally:
+        try:
+            _with_remote(remote, after)
+        except Exception as e:
+            _sync_log("동기화(올리기) 오류: %s" % e)
+    return rc
+
+
+# ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
 def main(argv=None):
@@ -1326,6 +1635,12 @@ def main(argv=None):
     p.add_argument("action", choices=["ls", "extract"]); p.add_argument("rel")
     p.add_argument("--record"); p.add_argument("--out", default="res_out")
     sub.add_parser("gui", help="GUI 실행(tkinter)")
+    p = sub.add_parser("sync-setup", help="세이브 동기화 폴더 지정(폴더 경로 또는 smb://호스트/공유/경로)"); p.add_argument("dir")
+    p.add_argument("--auth", help="smb:// 일 때 smbclient 인증 파일(username=/password=). 기본 ~/.cap2sync_smb")
+    p = sub.add_parser("sync", help="세이브 동기화 한 번 실행"); p.add_argument("--dir")
+    p.add_argument("--direction", choices=["both", "pull", "push"], default="both")
+    p = sub.add_parser("run", help="Steam 실행 옵션용: 세이브 받기 → 게임 → 세이브 올리기. 예: run -- %%command%%")
+    p.add_argument("--dir"); p.add_argument("command", nargs=argparse.REMAINDER)
     args = ap.parse_args(argv)
 
     global MODS_DIR, ENABLED_PATH
@@ -1375,9 +1690,40 @@ def main(argv=None):
             do_dump_text(game, norm_rel(args.rel), args.out)
         elif args.cmd == "res":
             do_res(game, norm_rel(args.rel), args.action, args.record, args.out)
+        elif args.cmd == "sync-setup":
+            if args.dir.startswith("smb://"):
+                remote = args.dir
+                SmbMirror(remote)          # 형식 검사
+            else:
+                remote = os.path.abspath(os.path.expanduser(args.dir))
+                os.makedirs(remote, exist_ok=True)
+            cfg = load_config(); cfg["sync_dir"] = remote
+            if args.auth:
+                cfg["sync_smb_auth"] = os.path.abspath(os.path.expanduser(args.auth))
+            save_config(cfg)
+            log("동기화 폴더: %s" % remote)
+            log("이 기기 세이브 폴더: %s" % (_local_save_root(game) or "(아직 없음)"))
+            if _with_remote(remote, lambda p: do_sync(game, p, "both")) is False:
+                raise ModError("원격에 접근하지 못했습니다. sync.log 를 확인하세요.")
+            py = sys.executable
+            if IS_WIN and py.lower().endswith("python.exe") and os.path.isfile(py[:-10] + "pythonw.exe"):
+                py = py[:-10] + "pythonw.exe"
+            log("Steam 실행 옵션(라이브러리 → Capitalism 2 → 속성 → 일반 → 실행 옵션)에 넣으세요:")
+            log('  "%s" "%s" run -- %%command%%' % (py, os.path.abspath(__file__)))
+        elif args.cmd == "sync":
+            if _with_remote(sync_remote(args.dir), lambda p: do_sync(game, p, args.direction)) is False:
+                return 1
+        elif args.cmd == "run":
+            cmd = args.command[1:] if args.command[:1] == ["--"] else args.command
+            return do_run(game, sync_remote(args.dir), cmd)
         return 0
     except ModError as e:
         log("오류: %s" % e)
+        if args.cmd in ("run", "sync"):
+            _sync_log("오류: %s" % e)
+            if args.cmd == "run" and args.command:     # 동기화 설정 문제로 게임 실행까지 막지 않음
+                cmd = args.command[1:] if args.command[:1] == ["--"] else args.command
+                return subprocess.call(cmd)
         return 1
 
 
