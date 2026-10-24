@@ -14,6 +14,8 @@ modmanager/
 └─ mods/
    ├─ enabled.json   모드 활성 상태(자동 생성)
    ├─ korean_patch/  한글 패치 모드
+   ├─ supply_hint/   공급처 없는 구매 칸 표시 모드
+   ├─ hires/         고해상도 모드(기본 꺼짐)
    └─ _template/     새 모드 템플릿(비활성)
 ```
 

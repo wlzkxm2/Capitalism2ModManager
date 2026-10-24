@@ -9,6 +9,7 @@
 # 한글 패치 모드 본체(릴리스 자산으로 배포)
 /modmanager/mods/korean_patch/
 /modmanager/mods/supply_hint/
+/modmanager/mods/hires/
 
 # 실행 시 생성되는 사용자별 상태
 /modmanager/config.json
